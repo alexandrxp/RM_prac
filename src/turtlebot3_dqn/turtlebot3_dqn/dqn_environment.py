@@ -48,12 +48,20 @@ class RLEnvironment(Node):
         self.robot_pose_x = 0.0
         self.robot_pose_y = 0.0
 
-        #Docking Positions
-        self.dock_pose_x = 1.0
-        self.dock_pose_y = 1.0
+        # Docking Positions - entrance reference point of the garage
+        # (set so robot driving in +x can enter)
+        self.dock_pose_x = 0.8
+        self.dock_pose_y = 0.0
 
-        #Desired final Orientation 
-        self.dock_yaw = 0.0 
+        # Desired final Orientation: face +x (0.0 radians)
+        self.dock_yaw = 0.0
+
+        # Garage zone parameters (rectangle in docking frame)
+        # depth: distance into the garage along dock_yaw direction (forward)
+        # width: lateral width of the garage opening
+        # These defaults assume the inner goal (1.0, 1.0) lies inside this rectangle
+        self.garage_depth = 0.8
+        self.garage_width = 2.4
 
         # Docking-specific values
         self.docking_orientation_error = 0.0 #error between robot orientation to desired docking orientation
@@ -244,16 +252,12 @@ class RLEnvironment(Node):
         for var in self.front_ranges:
             state.append(float(var))
         self.local_step += 1
-
-        if (self.goal_distance < 0.10 
-            and abs(self.docking_orientation_error < math.radians(25))
-            and self.current_linear_velocity <=0.05 
-            ):
-
-            self.get_logger().info('Goal Reached')
+        # Check garage-zone success: robot inside rectangular entrance and
+        # oriented approximately along the docking yaw and moving slowly.
+        if self.is_in_garage_zone() and abs(self.docking_orientation_error) < math.radians(25) and self.current_linear_velocity <= 0.05:
+            self.get_logger().info('Garage zone reached (Goal Reached)')
             self.succeed = True
             self.done = True
-            
             if ROS_DISTRO == 'humble':
                 self.cmd_vel_pub.publish(Twist())
             else:
@@ -284,6 +288,18 @@ class RLEnvironment(Node):
             self.call_task_failed()
 
         return state
+
+    def is_in_garage_zone(self):
+        # Transform robot position into the docking frame (x forward, y lateral)
+        dx = self.robot_pose_x - self.dock_pose_x
+        dy = self.robot_pose_y - self.dock_pose_y
+        # rotate by -dock_yaw: x_local = cos(dock_yaw)*dx + sin(dock_yaw)*dy
+        x_local = math.cos(self.dock_yaw) * dx + math.sin(self.dock_yaw) * dy
+        y_local = -math.sin(self.dock_yaw) * dx + math.cos(self.dock_yaw) * dy
+
+        in_depth = (0.0 <= x_local <= self.garage_depth)
+        in_width = (abs(y_local) <= (self.garage_width / 2.0))
+        return in_depth and in_width
 
     def compute_directional_weights(self, relative_angles, max_weight=10.0):
         power = 6
@@ -350,22 +366,22 @@ class RLEnvironment(Node):
         # 4. Docking-Station Orientation
         orientation_reward = 0.0
 
-        if self.goal_distance < 0.70:
+        if self.goal_distance < 1.20:
             orientation_reward = 3.0 * math.cos(self.docking_orientation_error) 
 
-        if self.goal_distance < 0.40:
+        if self.goal_distance < 0.80:
             orientation_reward = 6.0 * math.cos(self.docking_orientation_error)
 
         # 5. Speed according to Distance of Docking-Station
         speed_reward = 0.0
 
-        if self.goal_distance < 0.40:
+        if self.goal_distance < 0.80:
             if self.current_linear_velocity <= 0.08:
                 speed_reward += 1.0
             else:
                 speed_reward -= 2.0
 
-        if self.goal_distance < 0.20:
+        if self.goal_distance < 0.40:
             if self.current_linear_velocity <= 0.04:
                 speed_reward += 2.0
             else:
@@ -382,6 +398,15 @@ class RLEnvironment(Node):
             + speed_reward
             + time_penalty
         )
+
+        # Garage zone bonus: encourage entering the rectangular opening
+        zone_reward = 0.0
+        if self.is_in_garage_zone():
+            zone_reward = 30.0
+            if abs(self.docking_orientation_error) < math.radians(15):
+                zone_reward += 20.0
+
+        reward += zone_reward
 
 
         # 7. Terminal Rewards
