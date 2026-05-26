@@ -48,6 +48,18 @@ class RLEnvironment(Node):
         self.robot_pose_x = 0.0
         self.robot_pose_y = 0.0
 
+        #Docking Positions
+        self.dock_pose_x = 1.0
+        self.dock_pose_y = 1.0
+
+        #Desired final Orientation 
+        self.dock_yaw = 0.0 
+
+        # Docking-specific values
+        self.docking_orientation_error = 0.0 #error between robot orientation to desired docking orientation
+        self.prev_goal_distance = 1.0 #change rate of distance 
+        self.current_linear_velocity = 0.0 #for changing velocities close to docking station 
+
         self.action_size = 5
         self.max_step = 800
 
@@ -216,11 +228,11 @@ class RLEnvironment(Node):
             self.goal_pose_x - self.robot_pose_x)
 
         goal_angle = path_theta - self.robot_pose_theta
-        if goal_angle > math.pi:
-            goal_angle -= 2 * math.pi
+        goal_angle = self.normalize_angle(goal_angle)
 
-        elif goal_angle < -math.pi:
-            goal_angle += 2 * math.pi
+        self.docking_orientation_error = self.normalize_angle(
+            self.robot_pose_theta - self.dock_yaw
+        )
 
         self.goal_distance = goal_distance
         self.goal_angle = goal_angle
@@ -233,10 +245,15 @@ class RLEnvironment(Node):
             state.append(float(var))
         self.local_step += 1
 
-        if self.goal_distance < 0.20:
+        if (self.goal_distance < 0.10 
+            and abs(self.docking_orientation_error < math.radians(25))
+            and self.current_linear_velocity <=0.05 
+            ):
+
             self.get_logger().info('Goal Reached')
             self.succeed = True
             self.done = True
+            
             if ROS_DISTRO == 'humble':
                 self.cmd_vel_pub.publish(Twist())
             else:
@@ -292,6 +309,7 @@ class RLEnvironment(Node):
         relative_angles = numpy.unwrap(front_angles)
         relative_angles[relative_angles > numpy.pi] -= 2 * numpy.pi
 
+
         weights = self.compute_directional_weights(relative_angles, max_weight=10.0)
 
         safe_dists = numpy.clip(front_ranges - 0.25, 1e-2, 3.5)
@@ -303,34 +321,116 @@ class RLEnvironment(Node):
 
         return reward
 
+    # def calculate_reward(self):
+    #     yaw_reward = 1 - (2 * abs(self.goal_angle) / math.pi)
+    #     obstacle_reward = self.compute_weighted_obstacle_reward()
+
+    #     print('directional_reward: %f, obstacle_reward: %f' % (yaw_reward, obstacle_reward))
+    #     reward = yaw_reward + obstacle_reward
+
+    #     if self.succeed:
+    #         reward = 100.0
+    #     elif self.fail:
+    #         reward = -50.0
+
+    #     return reward
+
     def calculate_reward(self):
-        yaw_reward = 1 - (2 * abs(self.goal_angle) / math.pi)
+        # 1. Correct Yaw Direction
+        yaw_reward = 1 - (6 * abs(self.goal_angle) / math.pi)
+
+        # 2. Avoid Obstacles 
         obstacle_reward = self.compute_weighted_obstacle_reward()
 
-        print('directional_reward: %f, obstacle_reward: %f' % (yaw_reward, obstacle_reward))
-        reward = yaw_reward + obstacle_reward
+        # 3. Advance in Docking Station Orientation
+        distance_progress = self.prev_goal_distance - self.goal_distance
+        progress_reward = 80.0 * distance_progress
+        self.prev_goal_distance = self.goal_distance
 
+        # 4. Docking-Station Orientation
+        orientation_reward = 0.0
+
+        if self.goal_distance < 0.70:
+            orientation_reward = 3.0 * math.cos(self.docking_orientation_error) 
+
+        if self.goal_distance < 0.40:
+            orientation_reward = 6.0 * math.cos(self.docking_orientation_error)
+
+        # 5. Speed according to Distance of Docking-Station
+        speed_reward = 0.0
+
+        if self.goal_distance < 0.40:
+            if self.current_linear_velocity <= 0.08:
+                speed_reward += 1.0
+            else:
+                speed_reward -= 2.0
+
+        if self.goal_distance < 0.20:
+            if self.current_linear_velocity <= 0.04:
+                speed_reward += 2.0
+            else:
+                speed_reward -= 5.0
+
+
+        time_penalty = -0.01
+
+        reward = (
+            yaw_reward
+            + obstacle_reward
+            + progress_reward
+            + orientation_reward
+            + speed_reward
+            + time_penalty
+        )
+
+
+        # 7. Terminal Rewards
         if self.succeed:
-            reward = 100.0
+            reward = 200.0
         elif self.fail:
-            reward = -50.0
+            reward = -100.0
+
+        #Debug
+        print(
+            'yaw: %.3f, obstacle: %.3f, progress: %.3f, orient: %.3f, speed: %.3f, total: %.3f'
+            % (
+                yaw_reward,
+                obstacle_reward,
+                progress_reward,
+                orientation_reward,
+                speed_reward,
+                reward
+            )
+        )
 
         return reward
 
     def rl_agent_interface_callback(self, request, response):
         action = request.action
+        
+        #Velocity Dependency on Distance to Station
+        if self.goal_distance < 0.25:
+            linear_velocity = 0.04
+        elif self.goal_distance < 0.30:
+            linear_velocity = 0.08
+        else:
+            linear_velocity = 0.20
+
+        self.current_linear_velocity = linear_velocity
+
         if ROS_DISTRO == 'humble':
             msg = Twist()
-            msg.linear.x = 0.2
+            msg.linear.x = linear_velocity
             msg.angular.z = self.angular_vel[action]
         else:
             msg = TwistStamped()
-            msg.twist.linear.x = 0.2
+            msg.twist.linear.x = linear_velocity 
             msg.twist.angular.z = self.angular_vel[action]
 
         self.cmd_vel_pub.publish(msg)
+
         if self.stop_cmd_vel_timer is None:
-            self.prev_goal_distance = self.init_goal_distance
+            self.prev_goal_distance = self.init_goal_distance #oder goal_distance
             self.stop_cmd_vel_timer = self.create_timer(0.8, self.timer_callback)
         else:
             self.destroy_timer(self.stop_cmd_vel_timer)
@@ -354,6 +454,13 @@ class RLEnvironment(Node):
         else:
             self.cmd_vel_pub.publish(TwistStamped())
         self.destroy_timer(self.stop_cmd_vel_timer)
+    
+    def normalize_angle(self, angle):
+        while angle > math.pi:
+            angle -= 2.0 * math.pi
+        while angle < -math.pi:
+            angle += 2.0 * math.pi
+        return angle
 
     def euler_from_quaternion(self, quat):
         x = quat.x
