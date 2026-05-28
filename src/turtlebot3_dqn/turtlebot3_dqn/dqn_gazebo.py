@@ -19,7 +19,6 @@
 
 import os
 import random
-import math
 import subprocess
 import sys
 import time
@@ -47,13 +46,8 @@ class GazeboInterface(Node):
         self.stage = int(stage_num)
 
         self.entity_name = 'goal_box'
-        # fixed goal inside the garage
-        self.entity_pose_x = 1.0
-        self.entity_pose_y = 1.0
-        # orientation for garage opening: +x
-        self.dock_yaw = 0.0
-        # orientation of garage opening (yaw), default -x
-        self.dock_yaw = math.pi
+        self.entity_pose_x = 0.5
+        self.entity_pose_y = 0.0
 
         if ROS_DISTRO == 'humble':
             self.entity = None
@@ -100,9 +94,6 @@ class GazeboInterface(Node):
             entity_pose = Pose()
             entity_pose.position.x = self.entity_pose_x
             entity_pose.position.y = self.entity_pose_y
-            # set orientation quaternion from dock_yaw (+x)
-            entity_pose.orientation.z = math.sin(self.dock_yaw / 2.0)
-            entity_pose.orientation.w = math.cos(self.dock_yaw / 2.0)
 
             spawn_req = SpawnEntity.Request()
             spawn_req.name = self.entity_name
@@ -120,16 +111,13 @@ class GazeboInterface(Node):
             model_path = os.path.join(
                 package_share, 'models', 'turtlebot3_dqn_world', 'goal_box', 'model.sdf'
             )
-            # include orientation quaternion in pose
-            qz = math.sin(self.dock_yaw / 2.0)
-            qw = math.cos(self.dock_yaw / 2.0)
             req = (
                 f'sdf_filename: "{model_path}", '
                 f'name: "{self.entity_name}", '
                 f'pose: {{ position: {{ '
                 f'x: {self.entity_pose_x}, '
                 f'y: {self.entity_pose_y}, '
-                f'z: 0.0 }}, orientation: {{ x: 0.0, y: 0.0, z: {qz}, w: {qw} }} }}'
+                f'z: 0.0 }} }}'
             )
             cmd = [
                 'gz', 'service',
@@ -261,8 +249,17 @@ class GazeboInterface(Node):
         return response
 
     def generate_goal_pose(self):
-        self.entity_pose_x = 1.0
-        self.entity_pose_y = 1.0
+        if self.stage != 4:
+            self.entity_pose_x = random.randrange(-21, 21) / 10
+            self.entity_pose_y = random.randrange(-21, 21) / 10
+        else:
+            goal_pose_list = [
+                [1.0, 0.0], [2.0, -1.5], [0.0, -2.0], [2.0, 1.5], [0.5, 2.0], [-1.5, 2.1],
+                [-2.0, 0.5], [-2.0, -0.5], [-1.5, -2.0], [-0.5, -1.0], [2.0, -0.5], [-1.0, -1.0]
+            ]
+            rand_index = random.randint(0, len(goal_pose_list) - 1)
+            self.entity_pose_x = goal_pose_list[rand_index][0]
+            self.entity_pose_y = goal_pose_list[rand_index][1]
 
 
 def main(args=None):
