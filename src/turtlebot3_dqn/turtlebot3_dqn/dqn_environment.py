@@ -66,27 +66,6 @@ class RLEnvironment(Node):
         self.local_step = 0
         self.stop_cmd_vel_timer = None
         self.angular_vel = [1.5, 0.75, 0.0, -0.75, -1.5]
-
-        #Docking Parameters 
-        self.dock_pose_theta = math.pi / 2 #robot drives upward into the U
-
-        # Success tolerances for docking
-        self.dock_success_distance = 0.10      # meters
-        self.dock_success_angle = math.radians(15)   # radians
-        self.dock_success_lateral = 0.07       # meters
-
-        # Collision threshold should be smaller for docking,
-        # because the robot is intentionally close to the U walls.
-        self.collision_distance = 0.08
-
-        # Additional docking state values
-        self.dock_heading_error = 0.0
-        self.dock_lateral_error = 0.0
-        self.dock_forward_error = 0.0
-
-        # For progress reward
-        self.prev_goal_distance = self.goal_distance
-
         
         qos = QoSProfile(depth=10)
 
@@ -229,118 +208,61 @@ class RLEnvironment(Node):
         self.robot_pose_y = msg.pose.pose.position.y
         _, _, self.robot_pose_theta = self.euler_from_quaternion(msg.pose.pose.orientation)
 
-        # Vector from robot to goal
-        dx = self.goal_pose_x - self.robot_pose_x
-        dy = self.goal_pose_y - self.robot_pose_y
+        goal_distance = math.sqrt(
+            (self.goal_pose_x - self.robot_pose_x) ** 2
+            + (self.goal_pose_y - self.robot_pose_y) ** 2)
+        path_theta = math.atan2(
+            self.goal_pose_y - self.robot_pose_y,
+            self.goal_pose_x - self.robot_pose_x)
 
-        # Distance to goal
-        goal_distance = math.sqrt(dx ** 2 + dy ** 2)
+        goal_angle = path_theta - self.robot_pose_theta
+        if goal_angle > math.pi:
+            goal_angle -= 2 * math.pi
 
-        # Angle from robot to goal
-        path_theta = math.atan2(dy, dx)
-
-        # Relative angle between robot heading and goal direction
-        goal_angle = self.normalize_angle(path_theta - self.robot_pose_theta)
+        elif goal_angle < -math.pi:
+            goal_angle += 2 * math.pi
 
         self.goal_distance = goal_distance
         self.goal_angle = goal_angle
 
-        # ============================================================
-        # DOCKING-SPECIFIC ERRORS
-        # ============================================================
-
-        # Heading error:
-        # Difference between current robot orientation and desired final docking orientation.
-        self.dock_heading_error = self.normalize_angle(
-            self.dock_pose_theta - self.robot_pose_theta
-        )
-
-        # Forward error:
-        # How far the robot still is along the docking direction.
-        self.dock_forward_error = (
-            math.cos(self.dock_pose_theta) * dx +
-            math.sin(self.dock_pose_theta) * dy
-        )
-
-        # Lateral error:
-        # How far the robot is away from the centerline of the docking station.
-        self.dock_lateral_error = (
-            -math.sin(self.dock_pose_theta) * dx +
-            math.cos(self.dock_pose_theta) * dy
-        )
-
     def calculate_state(self):
         state = []
-
-        # Basic navigation state
         state.append(float(self.goal_distance))
         state.append(float(self.goal_angle))
-
-        # Docking-specific state
-        state.append(float(self.dock_heading_error))
-        state.append(float(self.dock_lateral_error))
-        state.append(float(self.dock_forward_error))
-
-        # Laser scan values in front of the robot
         for var in self.front_ranges:
             state.append(float(var))
-
         self.local_step += 1
 
-        # ============================================================
-        # SUCCESS CONDITION FOR DOCKING
-        # ============================================================
-
-        docking_success = (
-            self.goal_distance < self.dock_success_distance and
-            abs(self.dock_heading_error) < self.dock_success_angle and
-            abs(self.dock_lateral_error) < self.dock_success_lateral
-        )
-
-        if docking_success:
-            self.get_logger().info('Docking succeeded')
+        if self.goal_distance < 0.20:
+            self.get_logger().info('Goal Reached')
             self.succeed = True
             self.done = True
-
             if ROS_DISTRO == 'humble':
                 self.cmd_vel_pub.publish(Twist())
             else:
                 self.cmd_vel_pub.publish(TwistStamped())
-
             self.local_step = 0
             self.call_task_succeed()
 
-        # ============================================================
-        # COLLISION CONDITION
-        # ============================================================
-        # Important:
-        # For docking, this threshold must be smaller than before.
-        # Otherwise the side walls of the U-shape are treated as collision too early.
-
-        if self.min_obstacle_distance < self.collision_distance:
+        if self.min_obstacle_distance < 0.15:
             self.get_logger().info('Collision happened')
             self.fail = True
             self.done = True
-
             if ROS_DISTRO == 'humble':
                 self.cmd_vel_pub.publish(Twist())
             else:
                 self.cmd_vel_pub.publish(TwistStamped())
-
             self.local_step = 0
             self.call_task_failed()
 
-        # TIMEOUT CONDITION
         if self.local_step == self.max_step:
             self.get_logger().info('Time out!')
             self.fail = True
             self.done = True
-
             if ROS_DISTRO == 'humble':
                 self.cmd_vel_pub.publish(Twist())
             else:
                 self.cmd_vel_pub.publish(TwistStamped())
-
             self.local_step = 0
             self.call_task_failed()
 
@@ -451,15 +373,7 @@ class RLEnvironment(Node):
         yaw = numpy.arctan2(siny_cosp, cosy_cosp)
 
         return roll, pitch, yaw
-    
-    #
 
-    def normalize_angle(self, angle):
-        while angle > math.pi:
-            angle -= 2.0 * math.pi
-        while angle < -math.pi:
-            angle += 2.0 * math.pi
-        return angle
 
 def main(args=None):
     rclpy.init(args=args)
