@@ -142,7 +142,7 @@ class DQNAgent(Node):
             self.tf.config.set_visible_devices([], 'GPU')
 
         self.train_mode = True
-        self.state_size = 26
+        self.state_size = 29
         self.action_size = 5
 
         self.done = False
@@ -314,10 +314,20 @@ class DQNAgent(Node):
         rclpy.spin_until_future_complete(self, future)
         if future.result() is not None:
             state = future.result().state
+
+            if len(state) != self.state_size:
+                self.get_logger().error(
+                    f'State size mismatch after reset: expected {self.state_size}, got {len(state)}'
+                )
+                raise ValueError(
+                    f'State size mismatch after reset: expected {self.state_size}, got {len(state)}'
+                )
+
             state = numpy.reshape(numpy.asarray(state), [1, self.state_size])
         else:
             self.get_logger().error(
                 'Exception while calling service: {0}'.format(future.exception()))
+            state = numpy.zeros((1, self.state_size))
 
         return state
 
@@ -349,12 +359,24 @@ class DQNAgent(Node):
 
         if future.result() is not None:
             next_state = future.result().state
+
+            if len(next_state) != self.state_size:
+                self.get_logger().error(
+                    f'State size mismatch after step: expected {self.state_size}, got {len(next_state)}'
+                )
+                raise ValueError(
+                    f'State size mismatch after step: expected {self.state_size}, got {len(next_state)}'
+                )
+
             next_state = numpy.reshape(numpy.asarray(next_state), [1, self.state_size])
             reward = future.result().reward
             done = future.result().done
         else:
             self.get_logger().error(
                 'Exception while calling service: {0}'.format(future.exception()))
+            next_state = numpy.zeros((1, self.state_size))
+            reward = -100.0
+            done = True
 
         return next_state, reward, done
 
